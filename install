@@ -1,0 +1,13 @@
+#!/bin/bash
+
+NAME="REPLACE_WITH_NEW_NAME" 
+
+mkdir build/
+make
+chmod +x build/main
+
+echo -e '#!/bin/bash\nOLDDIR="$PWD"\ncd "'$PWD'"\n ./build/main $@\nP_STATUS=$(echo $?)\ncd "$OLDDIR"\nexit $P_STATUS' > /usr/bin/$NAME
+#cp CLI/$NAME.1.gz /usr/share/man/man1/$NAME.1.gz
+
+chmod +x /usr/bin/$NAME
+chmod +x uninstall

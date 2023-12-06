@@ -1,0 +1,8 @@
+#!/bin/bash
+
+NAME="REPLACE_WITH_NEW_NAME" 
+
+make clean
+
+rm /usr/bin/$NAME
+#rm /usr/share/man/man1/$NAME.1.gz
