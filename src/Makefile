@@ -11,7 +11,7 @@ DEPS =
 %.o: %.c $(DEPS)
 	$(CC) -g -c -o $@ $< $(CFLAGS)
 
-all: stub.o publisher subscriber broker
+all: stub.o stub_broker.o publisher subscriber broker
 
 publisher: publisher.c 
 	gcc -g -Wall -o publisher publisher.c -lpthread stub.o
@@ -20,7 +20,7 @@ subscriber: subscriber.c
 	gcc -g -Wall -o subscriber subscriber.c -lpthread stub.o
 
 broker: broker.c 
-	gcc -g -Wall -o broker broker.c -lpthread stub.o
+	gcc -g -Wall -o broker broker.c -lpthread stub_broker.o
 
 clean:
 	rm -f *.o publisher subscriber broker

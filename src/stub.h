@@ -28,6 +28,8 @@
 #define MAX_TOPIC_SIZE 100
 #define MAX_DATA_SIZE 100
 
+#define LOG(...) { print_epoch(); fprintf(stdout, __VA_ARGS__);}
+
 typedef enum operations {
     REGISTER_PUBLISHER = 0,
     UNREGISTER_PUBLISHER,
@@ -56,12 +58,10 @@ typedef enum {
     OK
 } broker_status_t;
 
-typedef struct {
+typedef struct broker_response{
     broker_status_t response_status;
     int id;
 } broker_response;
-
-int load_config_broker(int port);
 
 /**
  * @brief Initializes the publisher
@@ -73,14 +73,47 @@ int load_config_broker(int port);
  */
 int init_publisher(char broker_ip[MAX_IP_SIZE], int broker_port,
                    char topic[MAX_TOPIC_SIZE]);
+/**
+ * @brief 
+ * 
+ * @param topic 
+ * @param data 
+ * @return int 
+ */
+int publish(char topic[MAX_TOPIC_SIZE], char data[MAX_DATA_SIZE]);
 
+/**
+ * @brief 
+ * 
+ * @param id 
+ * @return int 
+ */
+int end_publisher(int id);
+
+/**
+ * @brief 
+ * 
+ * @param broker_ip 
+ * @param broker_port 
+ * @param topic 
+ * @return int 
+ */
 int subscribe(char broker_ip[MAX_IP_SIZE], int broker_port,
                    char topic[MAX_TOPIC_SIZE]);
 
-int publish(char topic[MAX_TOPIC_SIZE], char data[MAX_DATA_SIZE];
-char * listen();
+/**
+ * @brief 
+ * 
+ * @return char* 
+ */
+char * listen_topic();
 
-int end_publisher(int id);
+/**
+ * @brief 
+ * 
+ * @param id 
+ * @return int 
+ */
 int end_subscriber(int id);
 
 void print_epoch();

@@ -13,7 +13,6 @@
 
 #define ERROR(msg) { fprintf(stderr,"PROXY ERROR: %s",msg); perror("");}
 #define INFO(msg) fprintf(stderr,"PROXY INFO: %s\n",msg)
-#define LOG(...) { print_epoch(); fprintf(stdout, __VA_ARGS__);}
 
 #define NS_TO_S 1000000000
 #define NS_TO_MICROS 1000
@@ -23,71 +22,6 @@
 int sockfd;
 int id;
 char topic[MAX_TOPIC_SIZE];
-
-char client_ip[MAX_IP_SIZE];
-// ------------------------ Global variables for server ------------------------
-int server_sockfd;
-struct sockaddr *server_addr;
-socklen_t server_len;
-
-struct thread_info {
-    pthread_t thread;
-    int sockfd;
-};
-// -----------------------------------------------------------------------------
-
-// ---------------------------- Initialize sockets -----------------------------
-
-int load_config_broker(int port) {
-    const int enable = 1;
-    struct sockaddr_in servaddr;
-    int sock_fd, counter_fd;
-    socklen_t len;
-    struct sockaddr * addr = malloc(sizeof(struct sockaddr));
-
-    if (addr == NULL) err(EXIT_FAILURE, "failed to alloc memory");
-    memset(addr, 0, sizeof(struct sockaddr));
-
-    // Create socket and liste -------------------------------------------------
-    setbuf(stdout, NULL);
-
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = INADDR_ANY;
-    servaddr.sin_port = htons(port);
-
-    len = sizeof(servaddr);
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-
-    if (sock_fd < 0) {
-        ERROR("Socket failed");
-        return 0;
-    }
-
-    if (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR,
-        &enable, sizeof(int)) < 0) {
-        ERROR("Setsockopt(SO_REUSEADDR) failed");
-        return 0;
-    }
-
-    if (bind(sock_fd, (const struct sockaddr *) &servaddr, len) < 0) {
-        ERROR("Unable to bind");
-        return 0;
-    }
-
-    if (listen(sock_fd, 1000) < 0) {
-        ERROR("Unable to listen");
-        return 0;
-    }
-
-    // Set global variables ----------------------------------------------------
-    server_sockfd = sock_fd;
-    memcpy(addr, (struct sockaddr *) &servaddr, sizeof(struct sockaddr));
-    server_addr = addr;
-    server_len = len;
-
-    return sock_fd > 0;
-}
 
 // ---------------------------- Private functions ------------------------------
 int init_client(char broker_ip[MAX_IP_SIZE], int broker_port) {
@@ -138,14 +72,30 @@ int send_request_to_broker(operations operation, char topic[MAX_TOPIC_SIZE]) {
     return 1;
 }
 
+int unregister_from_broker(operations operation, int id,
+                           char topic[MAX_TOPIC_SIZE]) {
+    message msg;
+
+    msg.action = operation;
+    strcpy(msg.topic, topic);
+    msg.id = id;
+
+    if (send(sockfd, &msg, sizeof(msg), MSG_WAITALL) < 0) {
+        ERROR("Fail to send");
+        return 0;
+    }
+
+    return 1;
+}
+
 int wait_ack_broker(char topic[MAX_TOPIC_SIZE]) {
     broker_response resp;
-    int status = 0;
+    int status = 1;
 
     if (recv(sockfd, &resp, sizeof(resp), MSG_WAITALL) < 0) {
         ERROR("Fail to received");
         close(sockfd);
-        return 0;
+        return 1;
     }
 
     // Print response ----------------------------------------------------------
@@ -154,10 +104,43 @@ int wait_ack_broker(char topic[MAX_TOPIC_SIZE]) {
         LOG("Registrado correctamente con ID: %d para topic %s\n",
             resp.id, topic);
         id = resp.id;
+        status = 0;
         break;
     case LIMIT:
     case ERROR:
-        LOG("Error al hacer el registro: error=%d\n", status);
+        LOG("Error al hacer el registro: error=%d\n", resp.response_status);
+        break;
+    }
+
+    return status;
+}
+
+int wait_unregister_broker(int id) {
+    broker_response resp;
+    int status = 1;
+
+    if (recv(sockfd, &resp, sizeof(resp), MSG_WAITALL) < 0) {
+        ERROR("Fail to received");
+        close(sockfd);
+        return 1;
+    }
+
+    // Print response ----------------------------------------------------------
+    if (resp.id != id) {
+        LOG("Error al hacer el de-registro: error=ID_INCORRECTA\n");
+        return 1;
+    }
+
+    switch (resp.response_status) {
+    case OK:
+        LOG("De-Registrado (%d) correctamente del broker.\n",
+            resp.id);
+        id = resp.id;
+        status = 0;
+        break;
+    case LIMIT:
+    case ERROR:
+        LOG("Error al hacer el de-registro: error=%d\n", resp.response_status);
         break;
     }
 
@@ -165,14 +148,15 @@ int wait_ack_broker(char topic[MAX_TOPIC_SIZE]) {
 }
 // -------------------------- Functions for publisher --------------------------
 int init_publisher(char broker_ip[MAX_IP_SIZE], int broker_port,
-                   char topic[MAX_TOPIC_SIZE]) {
+                   char _topic[MAX_TOPIC_SIZE]) {
     sockfd = init_client(broker_ip, broker_port);
 
     // // Send request message ----------------------------------------------------
-    send_request_to_broker(REGISTER_PUBLISHER, topic);
+    send_request_to_broker(REGISTER_PUBLISHER, _topic);
+    strcpy(topic, _topic);
 
     // // Listen for response messages --------------------------------------------
-    return wait_ack_broker(topic);
+    return wait_ack_broker(_topic);
 }
 
 int publish(char topic[MAX_TOPIC_SIZE], char _data[MAX_DATA_SIZE]) {
@@ -198,24 +182,27 @@ int publish(char topic[MAX_TOPIC_SIZE], char _data[MAX_DATA_SIZE]) {
 }
 
 int end_publisher(int id) {
-    return 1;
+    unregister_from_broker(UNREGISTER_PUBLISHER, id, topic);
+    return wait_unregister_broker(id);
 }
 
 // -------------------------- Functions for subscriber ---------------------------
-int init_subscriber(char broker_ip[MAX_IP_SIZE], int broker_port,
-                   char topic[MAX_TOPIC_SIZE]) {
+int subscribe(char broker_ip[MAX_IP_SIZE], int broker_port,
+                   char _topic[MAX_TOPIC_SIZE]) {
     sockfd = init_client(broker_ip, broker_port);
 
     // // Send request message ----------------------------------------------------
-    send_request_to_broker(REGISTER_SUBSCRIBER, topic);
+    send_request_to_broker(REGISTER_SUBSCRIBER, _topic);
+    strcpy(topic, _topic);
 
     // // Listen for response messages --------------------------------------------
-    return wait_ack_broker(topic);                   
+    return wait_ack_broker(_topic);                   
 }
 
 
 int end_subscriber(int id) {
-    return 1;
+    unregister_from_broker(UNREGISTER_SUBSCRIBER, id, topic);
+    return wait_unregister_broker(id);
 }
 
 // -----------------------------------------------------------------------------

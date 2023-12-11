@@ -5,7 +5,7 @@
 #include <getopt.h>
 #include <err.h>
 
-#include "stub.h"
+#include "stub_broker.h"
 
 #define N_ARGS 4
 #define MODE_SEQUENTIAL_STR "secuencial"
@@ -27,7 +27,7 @@ typedef struct {
 broker_args * check_args(int argc, char *const *argv);
 
 void usage() {
-    fprintf(stderr, "usage: ./publisher --port BROKER_PORT --mode MODE\n");
+    fprintf(stderr, "usage: ./broker --port BROKER_PORT --mode MODE\n");
     exit(EXIT_FAILURE);
 }
 
@@ -35,6 +35,12 @@ int main(int argc, char *const *argv) {
     broker_args * arguments = check_args(argc, argv);
 
     printf("Mode: %d\n", arguments->mode);
+    load_config_broker(arguments->port);
+
+    while (1) {
+        wait_for_connection();
+    }
+    
 
     free(arguments);
     return 0;
