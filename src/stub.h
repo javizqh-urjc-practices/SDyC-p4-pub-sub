@@ -28,8 +28,6 @@
 #define MAX_TOPIC_SIZE 100
 #define MAX_DATA_SIZE 100
 
-#define LOG(...) { print_epoch(); fprintf(stdout, __VA_ARGS__);}
-
 typedef enum operations {
     REGISTER_PUBLISHER = 0,
     UNREGISTER_PUBLISHER,
@@ -80,7 +78,7 @@ int init_publisher(char broker_ip[MAX_IP_SIZE], int broker_port,
  * @param data 
  * @return int 
  */
-int publish(char topic[MAX_TOPIC_SIZE], char data[MAX_DATA_SIZE]);
+int publish(char data[MAX_DATA_SIZE]);
 
 /**
  * @brief 
@@ -88,7 +86,7 @@ int publish(char topic[MAX_TOPIC_SIZE], char data[MAX_DATA_SIZE]);
  * @param id 
  * @return int 
  */
-int end_publisher(int id);
+int end_publisher();
 
 /**
  * @brief 
@@ -114,6 +112,4 @@ char * listen_topic();
  * @param id 
  * @return int 
  */
-int end_subscriber(int id);
-
-void print_epoch();
+int end_subscriber();

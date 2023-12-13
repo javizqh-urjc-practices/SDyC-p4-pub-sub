@@ -13,6 +13,13 @@
 
 #define ERROR(msg) { fprintf(stderr,"PROXY ERROR: %s",msg); perror("");}
 #define INFO(msg) fprintf(stderr,"PROXY INFO: %s\n",msg)
+void print_epoch() {
+    struct timespec epoch;
+
+    clock_gettime(CLOCK_REALTIME, &epoch);
+    printf("[%ld.%.9ld] " , epoch.tv_sec, epoch.tv_nsec);
+}
+#define LOG(...) { print_epoch(); fprintf(stdout, __VA_ARGS__);}
 
 #define NS_TO_S 1000000000
 #define NS_TO_MICROS 1000
@@ -20,7 +27,7 @@
 
 // ------------------------ Global variables for client ------------------------
 int sockfd;
-int id;
+int id = -1;
 char topic[MAX_TOPIC_SIZE];
 
 // ---------------------------- Private functions ------------------------------
@@ -159,7 +166,7 @@ int init_publisher(char broker_ip[MAX_IP_SIZE], int broker_port,
     return wait_ack_broker(_topic);
 }
 
-int publish(char topic[MAX_TOPIC_SIZE], char _data[MAX_DATA_SIZE]) {
+int publish(char _data[MAX_DATA_SIZE]) {
     message msg;
 
     msg.action = PUBLISH_DATA;
@@ -172,7 +179,7 @@ int publish(char topic[MAX_TOPIC_SIZE], char _data[MAX_DATA_SIZE]) {
         return 0;
     }
 
-    LOG("Publicado mensaje topic: %s - mensaje: %s -Generó: %ld.%.9ld",
+    LOG("Publicado mensaje topic: %s - mensaje: %s - Generó: %ld.%.9ld\n",
         msg.topic,
         msg.data.data,
         msg.data.time_generated_data.tv_sec,
@@ -181,7 +188,7 @@ int publish(char topic[MAX_TOPIC_SIZE], char _data[MAX_DATA_SIZE]) {
     return 1;
 }
 
-int end_publisher(int id) {
+int end_publisher() {
     unregister_from_broker(UNREGISTER_PUBLISHER, id, topic);
     return wait_unregister_broker(id);
 }
@@ -206,10 +213,3 @@ int end_subscriber(int id) {
 }
 
 // -----------------------------------------------------------------------------
-
-void print_epoch() {
-    struct timespec epoch;
-
-    clock_gettime(CLOCK_REALTIME, &epoch);
-    printf("[%ld.%.9ld] " , epoch.tv_sec, epoch.tv_nsec);
-}
