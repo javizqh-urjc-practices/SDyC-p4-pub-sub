@@ -70,6 +70,9 @@ typedef struct topic {
     char name[MAX_TOPIC_SIZE];
     int n_pub;
     int n_sub;
+    // Modifications mutex
+    // Semaphore for serial resends
+    // Queue for resends
 } topic_t;
 
 topic_t * new_topic(char name[MAX_TOPIC_SIZE]) {
@@ -107,10 +110,12 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
     pthread_mutex_lock(&mutex_database);
     // Check topic first
     if (database->topics_size == 0) {
-        database->topics[0] = new_topic(topic);
         client->topic_id = 0;
+        // TODO: global lock
+        database->topics[0] = new_topic(topic);
         database->id_hashtable.topics[0] = USED;
         database->topics_size++;
+        // TODO: global lock
     } else if (database->topics_size < MAX_TOPIC_SIZE){
         for (int i = 0; i < database->topics_size; i++) {
             if (strcmp(database->topics[i]->name, topic) == 0) {
@@ -123,6 +128,7 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
     // Topic has not been found
     if (client->topic_id < 0) {
         if (database->topics_size < MAX_TOPIC_SIZE - 1) {
+            // TODO: global lock
             for (size_t i = 0; i < MAX_TOPICS; i++) {
                 if (database->id_hashtable.topics[i] == UNUSED) {
                     database->id_hashtable.topics[i] = USED;
@@ -132,6 +138,7 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
                     break;
                 }
             }
+            // TODO: global lock
         } else {
             // Limit reached in topics
             pthread_mutex_unlock(&mutex_database);
@@ -139,6 +146,7 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
         }
     }
 
+    // TODO: global lock
     if (client->type == PUBLISHER) {
         if (database->n_pub >= MAX_PUBLISHERS) {
             pthread_mutex_unlock(&mutex_database);
@@ -150,26 +158,32 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
             return;
         }
     }
-
-    database->clients[database->n_pub + database->n_sub] = client;
-    client->global_id = database->n_pub + database->n_sub;
+    // TODO: global lock
 
     if (client->type == PUBLISHER) {
         for (size_t i = 0; i < MAX_PUBLISHERS; i++) {
             if (database->id_hashtable.publishers[i] == UNUSED) {
+                // TODO: global lock
+                database->clients[i] = client;
                 database->id_hashtable.publishers[i] = USED;
-                database->topics[client->topic_id]->n_pub++;
-                client->id = i;
                 database->n_pub++;
+                // TODO: global lock
+                database->topics[client->topic_id]->n_pub++;
+                client->global_id = i;
+                client->id = i;
                 break;
             }
         }
     } else {
         for (size_t i = 0; i < MAX_SUBSCRIBERS; i++) {
             if (database->id_hashtable.subscribers[i] == UNUSED) {
+                // TODO: global lock
+                database->clients[i + MAX_PUBLISHERS] = client;
                 database->id_hashtable.subscribers[i] = USED;
-                database->topics[client->topic_id]->n_sub++;
                 database->n_sub++;
+                // TODO: global lock
+                database->topics[client->topic_id]->n_sub++;
+                client->global_id = i + MAX_PUBLISHERS;
                 client->id = i + 1;
                 break;
             }
@@ -190,6 +204,7 @@ void remove_from_database(client_t *client) {
     if (database->topics[client->topic_id]->n_pub +
         database->topics[client->topic_id]->n_sub <= 0) {
         // Remove topic
+        // TODO: global lock
         database->id_hashtable.topics[client->topic_id] = UNUSED;
         free(database->topics[client->topic_id]);
         for (int i = database->topics_size - 2; i >= client->topic_id; i--) {
@@ -197,22 +212,19 @@ void remove_from_database(client_t *client) {
             database->topics[i] = database->topics[i + 1];
         }
         database->topics_size--;
+        // TODO: global lock
     }
 
-    // Now shift all the other clients and free
-    for (int i = database->n_pub + database->n_sub - 1;
-        i >= client_id; i--) {
-        database->clients[i]->global_id--;
-        database->clients[i + 1] = database->clients[i];
-    }
-
+    // TODO: global lock
+    database->clients[client_id] = NULL;
     if (client->type == PUBLISHER) {
         database->id_hashtable.publishers[client_id] = UNUSED;
         database->n_pub--;
     } else {
-        database->id_hashtable.subscribers[client_id] = UNUSED;
+        database->id_hashtable.subscribers[client_id - MAX_PUBLISHERS] = UNUSED;
         database->n_sub--;
     }
+    // TODO: global lock
 
     close(client->socket_fd);
     free(client);
@@ -297,6 +309,8 @@ void * proccess_client_thread(void * args) {
     client_t * client = (client_t *) args;
     message msg;
     broker_response resp;
+    fd_set readmask;
+    struct timeval timeout;
 
     // Listen for connection message -------------------------------------------
     if (recv(client->socket_fd, &msg, sizeof(msg), MSG_WAITALL) < 0) {
@@ -380,9 +394,42 @@ void * proccess_client_thread(void * args) {
             }
         }
     } else if (client->type == SUBSCRIBER) {
-        //
+        FD_ZERO(&readmask); // Reset la mascara
+        FD_SET(client->socket_fd, &readmask); // Asignamos el nuevo descriptor
+        FD_SET(STDIN_FILENO, &readmask); // Entrada
+        timeout.tv_sec=0; timeout.tv_usec=5000; // Timeout de 0.005 seg.
+
+        if (select(client->socket_fd+1, &readmask, NULL, NULL, &timeout )== -1) {
+            remove_from_database(client);
+            pthread_exit(NULL);
+        }
+
+        while (1) {
+            // Check if subscriber sent UNREGISTER_PUBLISHER
+            if (FD_ISSET(client->socket_fd, &readmask)) {
+                if (recv(client->socket_fd, &msg, sizeof(msg), MSG_DONTWAIT) < 0) {
+                    ERROR("Fail to received");
+                    remove_from_database(client);
+                    pthread_exit(NULL);
+                }
+                if (msg.action == UNREGISTER_PUBLISHER) {
+                    resp.response_status = OK;
+                    resp.id = client->id;
+                    if (send(client->socket_fd, &resp, sizeof(resp), MSG_WAITALL) < 0) {
+                        ERROR("Failed to send");
+                    }
+                    remove_from_database(client);
+                    LOG("Eliminado cliente (%d) Publicador : %s\n", resp.id,
+                        msg.topic);
+                    print_summary();
+                    pthread_exit(NULL);
+                } else {
+                    // ERROR
+                }
+            }
+            // If message in queue, send it
+        }
     }
-    // If msg is unregistered remove from list and sent unregister ack 
 
     // Free all memory and close sockets ---------------------------------------
     remove_from_database(client);
