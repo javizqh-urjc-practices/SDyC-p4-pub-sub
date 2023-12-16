@@ -4,6 +4,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <err.h>
+#include <signal.h>
 
 #include "stub.h"
 
@@ -15,7 +16,10 @@ typedef struct args {
     char topic [MAX_TOPIC_SIZE];
 } * Args;
 
+int has_to_exit = 0;
+
 Args check_args(int argc, char *const *argv);
+void sig_handler(int sig);
 
 void usage() {
     fprintf(stderr, "usage: ./subscriber --ip BROKER_IP --port BROKER_PORT \
@@ -27,7 +31,14 @@ void usage() {
 int main(int argc, char *const *argv) {
     Args arguments = check_args(argc, argv);
 
-    printf("Topic: %s\n", arguments->topic);
+    signal(SIGINT, sig_handler);
+    signal(SIGPIPE, sig_handler);
+
+    subscribe(arguments->ip, arguments->port, arguments->topic);
+    while (!has_to_exit) {
+        listen_topic();
+    }
+    end_subscriber();
 
     free(arguments);
     return 0;
@@ -83,4 +94,15 @@ Args check_args(int argc, char *const *argv) {
         usage();
     }
     return arguments;
+}
+
+void sig_handler(int sig) {
+	switch (sig) {
+    case SIGINT:
+    case SIGPIPE:
+        has_to_exit = 1;
+        break;
+	default:
+		break;
+	}
 }

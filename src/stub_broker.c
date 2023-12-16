@@ -10,6 +10,7 @@
  */
 
 #include <threads.h>
+#include <semaphore.h>
 #include "stub_broker.h"
 #include "stub.h"
 
@@ -22,6 +23,10 @@ void print_epoch() {
     printf("[%ld.%.9ld] " , epoch.tv_sec, epoch.tv_nsec);
 }
 #define LOG(...) { print_epoch(); fprintf(stdout, __VA_ARGS__);}
+#define LOCK_GLOBAL(mutex) pthread_mutex_lock(&mutex);
+#define UNLOCK_GLOBAL(mutex) pthread_mutex_unlock(&mutex);
+#define LOCK_LOCAL(mutex) pthread_mutex_lock(&mutex);
+#define UNLOCK_LOCAL(mutex) pthread_mutex_unlock(&mutex);
 
 #define NS_TO_S 1000000000
 #define NS_TO_MICROS 1000
@@ -31,6 +36,64 @@ void print_epoch() {
 #define USED 1
 
 // ------------------------ Global variables for server ------------------------
+// Queue structure for resending messages
+typedef struct node {
+    publish_msg data;
+    struct node *next;
+} node_msg_t;
+
+typedef struct queue {
+    node_msg_t * head; // Queue for resends
+    node_msg_t * tail; // Queue for resends
+} queue;
+
+queue * new_queue() {
+    queue * q = (queue *) malloc(sizeof(queue));
+    if (q == NULL) {
+        ERROR("failed to allocate data");
+        return NULL;
+    }
+    memset(q, 0, sizeof(queue));
+
+    q->head = NULL;
+    q->tail = NULL;
+
+    return q;
+}
+
+void queue_msg(queue * q, publish_msg data) {
+    node_msg_t * new_msg = (node_msg_t *) malloc(sizeof(node_msg_t));
+    if (new_msg == NULL) {
+        ERROR("failed to allocate data");
+        return;
+    }
+    memset(new_msg, 0, sizeof(node_msg_t));
+
+    new_msg->data = data;
+    new_msg->next = NULL;
+
+    if (q->head == NULL) q->head = new_msg;
+    else q->tail->next = new_msg;
+
+    q->tail = new_msg;
+
+    return;
+}
+
+void delete_msg(queue * q) {
+    node_msg_t * to_free = q->tail;
+
+    if (q->head == q->tail) {
+        free(q->head);
+        q->head = NULL;
+        q->tail = NULL;
+    } else {
+        for (node_msg_t * current_msg = q->head; current_msg->next != NULL; current_msg = current_msg->next)
+        q->tail = current_msg;
+        free(to_free);
+    }
+}
+
 // Data structure to store publishers and subscribers
 typedef struct hashtable {
     short publishers[100];
@@ -69,10 +132,11 @@ client_t * new_client() {
 typedef struct topic {
     char name[MAX_TOPIC_SIZE];
     int n_pub;
-    int n_sub;
-    // Modifications mutex
-    // Semaphore for serial resends
-    // Queue for resends
+    int n_sub; // Need FIFO of global_ids for secuential
+    pthread_mutex_t op_mutex; // Modifications mutex
+    sem_t serial_sem; // Semaphore for serial resends
+    pthread_barrier_t sync;// Barrier for controlling subscribers
+    queue * msg_queue;
 } topic_t;
 
 topic_t * new_topic(char name[MAX_TOPIC_SIZE]) {
@@ -86,8 +150,22 @@ topic_t * new_topic(char name[MAX_TOPIC_SIZE]) {
     strcpy(topic->name, name);
     topic->n_pub = 0;
     topic->n_sub = 0;
+    topic->msg_queue = new_queue();
+
+    pthread_mutex_init(&topic->op_mutex, NULL);
+    if (sem_init(&topic->serial_sem, 0, 1) == -1) {
+        err(EXIT_FAILURE, "failed to create semaphore");
+    }
 
     return topic;
+};
+
+void destroy_topic(topic_t * topic) {
+    pthread_mutex_destroy(&topic->op_mutex);
+    sem_destroy(&topic->serial_sem);
+    // TODO: Free all msgs
+    free(topic->msg_queue);
+    free(topic);
 };
 
 typedef struct database {
@@ -107,28 +185,30 @@ database_t *database;
 pthread_mutex_t mutex_database;
 
 void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
-    pthread_mutex_lock(&mutex_database);
     // Check topic first
     if (database->topics_size == 0) {
         client->topic_id = 0;
-        // TODO: global lock
+        LOCK_GLOBAL(mutex_database);
         database->topics[0] = new_topic(topic);
         database->id_hashtable.topics[0] = USED;
         database->topics_size++;
-        // TODO: global lock
+        UNLOCK_GLOBAL(mutex_database);
     } else if (database->topics_size < MAX_TOPIC_SIZE){
         for (int i = 0; i < database->topics_size; i++) {
+            LOCK_LOCAL(database->topics[i]->op_mutex);
             if (strcmp(database->topics[i]->name, topic) == 0) {
                 client->topic_id = i;
+                UNLOCK_LOCAL(database->topics[i]->op_mutex);
                 break;
             }
+            UNLOCK_LOCAL(database->topics[i]->op_mutex);
         }
     }
 
     // Topic has not been found
     if (client->topic_id < 0) {
         if (database->topics_size < MAX_TOPIC_SIZE - 1) {
-            // TODO: global lock
+            LOCK_GLOBAL(mutex_database);
             for (size_t i = 0; i < MAX_TOPICS; i++) {
                 if (database->id_hashtable.topics[i] == UNUSED) {
                     database->id_hashtable.topics[i] = USED;
@@ -138,37 +218,40 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
                     break;
                 }
             }
-            // TODO: global lock
+            UNLOCK_GLOBAL(mutex_database);
         } else {
             // Limit reached in topics
-            pthread_mutex_unlock(&mutex_database);
             return;
         }
     }
 
-    // TODO: global lock
+    LOCK_GLOBAL(mutex_database);
     if (client->type == PUBLISHER) {
         if (database->n_pub >= MAX_PUBLISHERS) {
-            pthread_mutex_unlock(&mutex_database);
+            UNLOCK_GLOBAL(mutex_database);
             return;
         }
     } else {
         if (database->n_sub >= MAX_SUBSCRIBERS) {
-            pthread_mutex_unlock(&mutex_database);
+            UNLOCK_GLOBAL(mutex_database);
             return;
         }
     }
-    // TODO: global lock
+    UNLOCK_GLOBAL(mutex_database);
 
     if (client->type == PUBLISHER) {
         for (size_t i = 0; i < MAX_PUBLISHERS; i++) {
             if (database->id_hashtable.publishers[i] == UNUSED) {
-                // TODO: global lock
+                LOCK_GLOBAL(mutex_database);
                 database->clients[i] = client;
                 database->id_hashtable.publishers[i] = USED;
                 database->n_pub++;
-                // TODO: global lock
+                UNLOCK_GLOBAL(mutex_database);
+
+                LOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
                 database->topics[client->topic_id]->n_pub++;
+                UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
+
                 client->global_id = i;
                 client->id = i;
                 break;
@@ -177,45 +260,46 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
     } else {
         for (size_t i = 0; i < MAX_SUBSCRIBERS; i++) {
             if (database->id_hashtable.subscribers[i] == UNUSED) {
-                // TODO: global lock
+                LOCK_GLOBAL(mutex_database);
                 database->clients[i + MAX_PUBLISHERS] = client;
                 database->id_hashtable.subscribers[i] = USED;
                 database->n_sub++;
-                // TODO: global lock
+                UNLOCK_GLOBAL(mutex_database);
+
+                LOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
                 database->topics[client->topic_id]->n_sub++;
+                UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
+
                 client->global_id = i + MAX_PUBLISHERS;
                 client->id = i + 1;
                 break;
             }
         }
     }
-
-    pthread_mutex_unlock(&mutex_database);
 }
 
 void remove_from_database(client_t *client) {
     int client_id = client->global_id;
 
-    pthread_mutex_lock(&mutex_database);
     // Check topic first
+    LOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
     if (client->type == PUBLISHER) database->topics[client->topic_id]->n_pub--;
     else database->topics[client->topic_id]->n_sub--;
 
     if (database->topics[client->topic_id]->n_pub +
         database->topics[client->topic_id]->n_sub <= 0) {
         // Remove topic
-        // TODO: global lock
+        LOCK_GLOBAL(mutex_database);
         database->id_hashtable.topics[client->topic_id] = UNUSED;
-        free(database->topics[client->topic_id]);
-        for (int i = database->topics_size - 2; i >= client->topic_id; i--) {
-            fprintf(stderr,"Topic shifted %d, %s\n",i, database->topics[i + 1]->name);
-            database->topics[i] = database->topics[i + 1];
-        }
         database->topics_size--;
-        // TODO: global lock
-    }
+        UNLOCK_GLOBAL(mutex_database);
 
-    // TODO: global lock
+        UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
+        destroy_topic(database->topics[client->topic_id]);
+    }
+    UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
+
+    LOCK_GLOBAL(mutex_database);
     database->clients[client_id] = NULL;
     if (client->type == PUBLISHER) {
         database->id_hashtable.publishers[client_id] = UNUSED;
@@ -224,11 +308,10 @@ void remove_from_database(client_t *client) {
         database->id_hashtable.subscribers[client_id - MAX_PUBLISHERS] = UNUSED;
         database->n_sub--;
     }
-    // TODO: global lock
+    UNLOCK_GLOBAL(mutex_database);
 
     close(client->socket_fd);
     free(client);
-    pthread_mutex_unlock(&mutex_database);
 }
 
 void print_summary() {
@@ -307,6 +390,7 @@ int load_config_broker(int port) {
 
 void * proccess_client_thread(void * args) {
     client_t * client = (client_t *) args;
+    topic_t * topic;
     message msg;
     broker_response resp;
     fd_set readmask;
@@ -362,6 +446,8 @@ void * proccess_client_thread(void * args) {
         print_summary();
     }
 
+    topic = database->topics[client->topic_id];
+
     // Start normal function ---------------------------------------------------
     if (client->type == PUBLISHER) {
         while (1) {
@@ -377,6 +463,17 @@ void * proccess_client_thread(void * args) {
 - Generó: %ld.%.9ld\n", msg.topic, msg.data.data,
                     msg.data.time_generated_data.tv_sec,
                     msg.data.time_generated_data.tv_nsec);
+                // Queue message and wait to mutex to unlock
+                if (topic->n_sub == 0) continue;
+                queue_msg(topic->msg_queue, msg.data);
+                printf("Queue message: %s\n", topic->msg_queue->head->data.data);
+
+                // Do not allow for other publishers or subscribers to join this topic
+                // LOCK_LOCAL(topic->op_mutex);
+                // pthread_barrier_init(&topic->sync, NULL, topic->n_sub);
+                // Allow all of them and wait for all to reach the barrier at the end, then  destroy it and unlock mutex
+                // For parallel only barrier at the end, for fair barrier at the beggining and at the end
+                // Secuential is the hardest one
 
             } else if (msg.action == UNREGISTER_PUBLISHER) {
                 resp.response_status = OK;
@@ -394,32 +491,31 @@ void * proccess_client_thread(void * args) {
             }
         }
     } else if (client->type == SUBSCRIBER) {
-        FD_ZERO(&readmask); // Reset la mascara
-        FD_SET(client->socket_fd, &readmask); // Asignamos el nuevo descriptor
-        FD_SET(STDIN_FILENO, &readmask); // Entrada
-        timeout.tv_sec=0; timeout.tv_usec=5000; // Timeout de 0.005 seg.
-
-        if (select(client->socket_fd+1, &readmask, NULL, NULL, &timeout )== -1) {
-            remove_from_database(client);
-            pthread_exit(NULL);
-        }
 
         while (1) {
             // Check if subscriber sent UNREGISTER_PUBLISHER
+            FD_ZERO(&readmask); // Reset la mascara
+            FD_SET(client->socket_fd, &readmask); // Asignamos el nuevo descriptor
+            FD_SET(STDIN_FILENO, &readmask); // Entrada
+            timeout.tv_sec=0; timeout.tv_usec=5000; // Timeout de 0.005 seg.
+            if (select(client->socket_fd+1, &readmask, NULL, NULL, &timeout )== -1) {
+                continue;
+            }
+            
             if (FD_ISSET(client->socket_fd, &readmask)) {
                 if (recv(client->socket_fd, &msg, sizeof(msg), MSG_DONTWAIT) < 0) {
                     ERROR("Fail to received");
                     remove_from_database(client);
                     pthread_exit(NULL);
                 }
-                if (msg.action == UNREGISTER_PUBLISHER) {
+                if (msg.action == UNREGISTER_SUBSCRIBER) {
                     resp.response_status = OK;
                     resp.id = client->id;
                     if (send(client->socket_fd, &resp, sizeof(resp), MSG_WAITALL) < 0) {
                         ERROR("Failed to send");
                     }
                     remove_from_database(client);
-                    LOG("Eliminado cliente (%d) Publicador : %s\n", resp.id,
+                    LOG("Eliminado cliente (%d) Suscriptor : %s\n", resp.id,
                         msg.topic);
                     print_summary();
                     pthread_exit(NULL);
@@ -428,6 +524,21 @@ void * proccess_client_thread(void * args) {
                 }
             }
             // If message in queue, send it
+            if (topic->msg_queue->head != NULL) {
+                LOG("Enviando mensaje en topic %s a %d suscriptores.\n", topic->name, topic->n_sub);
+                // Wait for all subscribers to send
+                msg.action = PUBLISH_DATA;
+                msg.id = 0;
+                strcpy(msg.topic, topic->name);
+                msg.data = topic->msg_queue->head->data;
+                if (send(client->socket_fd, &msg, sizeof(msg), MSG_WAITALL) < 0) {
+                    ERROR("Failed to send");
+                    remove_from_database(client);
+                }
+                delete_msg(topic->msg_queue);
+                // pthread_barrier_destroy(&database->topics[client->topic_id]->sync); // So that next time the number of subs could change
+                // UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
+            }
         }
     }
 

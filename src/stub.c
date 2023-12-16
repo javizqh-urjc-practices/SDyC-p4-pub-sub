@@ -30,6 +30,10 @@ int sockfd;
 int id = -1;
 char topic[MAX_TOPIC_SIZE];
 
+// For subscriber
+fd_set readmask;
+struct timeval timeout;
+
 // ---------------------------- Private functions ------------------------------
 int init_client(char broker_ip[MAX_IP_SIZE], int broker_port) {
     struct in_addr addr;
@@ -134,6 +138,7 @@ int wait_unregister_broker(int id) {
 
     // Print response ----------------------------------------------------------
     if (resp.id != id) {
+        printf("Id: %d, my %d\n", resp.id, id);
         LOG("Error al hacer el de-registro: error=ID_INCORRECTA\n");
         return 1;
     }
@@ -206,8 +211,37 @@ int subscribe(char broker_ip[MAX_IP_SIZE], int broker_port,
     return wait_ack_broker(_topic);                   
 }
 
+char * listen_topic() {
+    message resp;
+    struct timespec recv_time;
 
-int end_subscriber(int id) {
+    FD_ZERO(&readmask); // Reset la mascara
+    FD_SET(sockfd, &readmask); // Asignamos el nuevo descriptor
+    FD_SET(STDIN_FILENO, &readmask); // Entrada
+    timeout.tv_sec=0; timeout.tv_usec=5000; // Timeout de 0.005 seg.
+
+    if (select(sockfd+1, &readmask, NULL, NULL, &timeout )== -1) {
+        return NULL;
+    }
+
+    if (FD_ISSET(sockfd, &readmask)) {
+        if (recv(sockfd, &resp, sizeof(resp), MSG_DONTWAIT) < 0) {
+            ERROR("Fail to received");
+        }
+        clock_gettime(CLOCK_REALTIME, &recv_time);
+        LOG("Recibido mensaje topic: %s - mensaje: %s - Generó: %ld.%.9ld \
+- Recibido: %ld.%.9ld - Latencia: %ld.%.9ld\n", topic, resp.data.data,
+            resp.data.time_generated_data.tv_sec,
+            resp.data.time_generated_data.tv_nsec, 
+            recv_time.tv_sec,
+            recv_time.tv_nsec,
+            recv_time.tv_sec - resp.data.time_generated_data.tv_sec,
+            recv_time.tv_nsec - resp.data.time_generated_data.tv_nsec
+        ); // FIX: calculate latency properly
+    }
+};
+
+int end_subscriber() {
     unregister_from_broker(UNREGISTER_SUBSCRIBER, id, topic);
     return wait_unregister_broker(id);
 }
