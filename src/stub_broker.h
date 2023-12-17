@@ -28,13 +28,19 @@
 #define MAX_PUBLISHERS 100
 #define MAX_SUBSCRIBERS 900
 
+typedef enum {
+    MODE_SEQUENTIAL = 0,
+    MODE_PARALLEL,
+    MODE_FAIR
+} broker_mode_t;
+
 /**
  * @brief 
  * 
  * @param port 
  * @return int 
  */
-int load_config_broker(int port);
+int load_config_broker(int port, broker_mode_t mode);
 
 /**
  * @brief 

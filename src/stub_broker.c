@@ -45,6 +45,7 @@ typedef struct node {
 typedef struct queue {
     node_msg_t * head; // Queue for resends
     node_msg_t * tail; // Queue for resends
+    pthread_mutex_t mutex;
 } queue;
 
 queue * new_queue() {
@@ -58,6 +59,8 @@ queue * new_queue() {
     q->head = NULL;
     q->tail = NULL;
 
+    pthread_mutex_init(&q->mutex, NULL);
+
     return q;
 }
 
@@ -69,6 +72,8 @@ void queue_msg(queue * q, publish_msg data) {
     }
     memset(new_msg, 0, sizeof(node_msg_t));
 
+    pthread_mutex_lock(&q->mutex);
+
     new_msg->data = data;
     new_msg->next = NULL;
 
@@ -76,23 +81,105 @@ void queue_msg(queue * q, publish_msg data) {
     else q->tail->next = new_msg;
 
     q->tail = new_msg;
+    pthread_mutex_unlock(&q->mutex);
+    return;
+}
+
+int has_msg(queue * q) {
+    int return_value = 0;
+
+    pthread_mutex_lock(&q->mutex);
+    return_value = q->head != NULL;
+    pthread_mutex_unlock(&q->mutex);
+
+    return return_value;
+}
+
+void delete_msg(queue * q) {
+    node_msg_t * to_free = q->head;
+
+    pthread_mutex_lock(&q->mutex);
+    if (q->head == q->tail) q->tail = NULL;
+
+    q->head = to_free->next;
+    free(to_free);
+    pthread_mutex_unlock(&q->mutex);
+}
+// Queue structure for resending messages
+typedef struct node_sub {
+    int id;
+    struct node_sub *next;
+    struct node_sub *prev;
+} node_sub_t;
+
+typedef struct queue_sub {
+    node_sub_t * head; // Queue for secuential resends
+    node_sub_t * tail; // Queue for secuential resends
+    node_sub_t * curr; // Queue for secuential resends
+    int msg_resend; // Number of messages resended
+} queue_sub;
+
+queue_sub * new_queue_sub() {
+    queue_sub * q = (queue_sub *) malloc(sizeof(queue_sub));
+    if (q == NULL) {
+        ERROR("failed to allocate data");
+        return NULL;
+    }
+    memset(q, 0, sizeof(queue_sub));
+
+    q->head = NULL;
+    q->tail = NULL;
+    q->curr = NULL;
+    q->msg_resend = 0;
+
+    return q;
+}
+
+void add_sub(queue_sub * q, int id) {
+    node_sub_t * new_sub = (node_sub_t *) malloc(sizeof(node_sub_t));
+    if (new_sub == NULL) {
+        ERROR("failed to allocate data");
+        return;
+    }
+    memset(new_sub, 0, sizeof(node_sub_t));
+
+    new_sub->id = id;
+    new_sub->next = NULL;
+    new_sub->prev = NULL;
+
+    if (q->head == NULL) q->head = new_sub;
+    else q->tail->next = new_sub;
+
+    new_sub->prev = q->tail;
+    q->tail = new_sub;
+    q->curr = q->head;
 
     return;
 }
 
-void delete_msg(queue * q) {
-    node_msg_t * to_free = q->tail;
+void delete_sub(queue_sub * q, int id) {
+    node_sub_t * to_free;
 
-    if (q->head == q->tail) {
-        free(q->head);
-        q->head = NULL;
-        q->tail = NULL;
-    } else {
-        for (node_msg_t * current_msg = q->head; current_msg->next != NULL; current_msg = current_msg->next)
-        q->tail = current_msg;
-        free(to_free);
+    for (to_free = q->head; to_free != NULL; to_free = to_free->next) {
+        if (to_free->id == id) break;
     }
+    
+    if (to_free == NULL) return; // Not found
+
+    if (q->head == to_free) {
+        q->head = q->head->next;
+        if (q->head) q->head->prev = NULL;
+    } else if (q->tail == to_free) {
+        q->tail = q->tail->prev;
+        if (q->tail) q->tail->next = NULL;
+    } else {
+        to_free->prev->next = to_free->next;
+        to_free->next->prev = to_free->prev;
+    }
+    q->curr = q->head;
+    free(to_free);
 }
+
 
 // Data structure to store publishers and subscribers
 typedef struct hashtable {
@@ -132,9 +219,11 @@ client_t * new_client() {
 typedef struct topic {
     char name[MAX_TOPIC_SIZE];
     int n_pub;
-    int n_sub; // Need FIFO of global_ids for secuential
+    int n_sub;
+    queue_sub * sub_order; // Need FIFO of global_ids for secuential 
     pthread_mutex_t op_mutex; // Modifications mutex
-    sem_t serial_sem; // Semaphore for serial resends
+    pthread_mutex_t utility_mutex;
+    pthread_cond_t secuential; // Semaphore for secuential resends
     pthread_barrier_t sync;// Barrier for controlling subscribers
     queue * msg_queue;
 } topic_t;
@@ -151,18 +240,20 @@ topic_t * new_topic(char name[MAX_TOPIC_SIZE]) {
     topic->n_pub = 0;
     topic->n_sub = 0;
     topic->msg_queue = new_queue();
+    topic->sub_order = new_queue_sub();
 
     pthread_mutex_init(&topic->op_mutex, NULL);
-    if (sem_init(&topic->serial_sem, 0, 1) == -1) {
-        err(EXIT_FAILURE, "failed to create semaphore");
-    }
+    pthread_mutex_init(&topic->utility_mutex, NULL);
+    pthread_cond_init(&topic->secuential, NULL);
 
     return topic;
 };
 
 void destroy_topic(topic_t * topic) {
     pthread_mutex_destroy(&topic->op_mutex);
-    sem_destroy(&topic->serial_sem);
+    pthread_mutex_destroy(&topic->utility_mutex);
+    pthread_cond_destroy(&topic->secuential);
+    free(topic->sub_order);
     // TODO: Free all msgs
     free(topic->msg_queue);
     free(topic);
@@ -183,6 +274,7 @@ socklen_t server_len;
 database_t *database;
 
 pthread_mutex_t mutex_database;
+broker_mode_t mode = MODE_SEQUENTIAL;
 
 void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
     // Check topic first
@@ -266,12 +358,19 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
                 database->n_sub++;
                 UNLOCK_GLOBAL(mutex_database);
 
-                LOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
-                database->topics[client->topic_id]->n_sub++;
-                UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
-
                 client->global_id = i + MAX_PUBLISHERS;
                 client->id = i + 1;
+
+                LOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
+                if (database->topics[client->topic_id]->n_sub > 0) {
+                    pthread_barrier_destroy(&database->topics[client->topic_id]->sync); // So that next time the number of subs could change
+                }
+                database->topics[client->topic_id]->n_sub++;
+                pthread_barrier_init(&database->topics[client->topic_id]->sync,
+                                     NULL,
+                                     database->topics[client->topic_id]->n_sub);
+                add_sub(database->topics[client->topic_id]->sub_order, client->global_id);
+                UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
                 break;
             }
         }
@@ -296,18 +395,26 @@ void remove_from_database(client_t *client) {
 
         UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
         destroy_topic(database->topics[client->topic_id]);
+    } else {
+        UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
     }
-    UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
 
     LOCK_GLOBAL(mutex_database);
-    database->clients[client_id] = NULL;
     if (client->type == PUBLISHER) {
         database->id_hashtable.publishers[client_id] = UNUSED;
         database->n_pub--;
     } else {
         database->id_hashtable.subscribers[client_id - MAX_PUBLISHERS] = UNUSED;
+        if (database->id_hashtable.topics[client->topic_id] == USED) {
+            pthread_barrier_destroy(&database->topics[client->topic_id]->sync); // So that next time the number of subs could change
+            pthread_barrier_init(&database->topics[client->topic_id]->sync,
+                                    NULL,
+                                    database->topics[client->topic_id]->n_sub);
+            delete_sub(database->topics[client->topic_id]->sub_order, client_id);
+        }
         database->n_sub--;
     }
+    database->clients[client_id] = NULL;
     UNLOCK_GLOBAL(mutex_database);
 
     close(client->socket_fd);
@@ -328,7 +435,7 @@ void print_summary() {
 
 // ---------------------------- Initialize sockets -----------------------------
 
-int load_config_broker(int port) {
+int load_config_broker(int port, broker_mode_t _mode) {
     const int enable = 1;
     struct sockaddr_in servaddr;
     int sock_fd, counter_fd;
@@ -375,6 +482,7 @@ int load_config_broker(int port) {
     memcpy(addr, (struct sockaddr *) &servaddr, sizeof(struct sockaddr));
     server_addr = addr;
     server_len = len;
+    mode = _mode;
     database_t *data = malloc(sizeof(database_t));
     memset(data, 0, sizeof(database_t));
     if (data == NULL) {
@@ -465,15 +573,11 @@ void * proccess_client_thread(void * args) {
                     msg.data.time_generated_data.tv_nsec);
                 // Queue message and wait to mutex to unlock
                 if (topic->n_sub == 0) continue;
+                
                 queue_msg(topic->msg_queue, msg.data);
-                printf("Queue message: %s\n", topic->msg_queue->head->data.data);
-
-                // Do not allow for other publishers or subscribers to join this topic
-                // LOCK_LOCAL(topic->op_mutex);
-                // pthread_barrier_init(&topic->sync, NULL, topic->n_sub);
-                // Allow all of them and wait for all to reach the barrier at the end, then  destroy it and unlock mutex
-                // For parallel only barrier at the end, for fair barrier at the beggining and at the end
-                // Secuential is the hardest one
+                LOG("Enviando mensaje en topic %s a %d suscriptores.\n", topic->name, topic->n_sub);
+                // TODO: move this from here
+                LOCK_LOCAL(topic->op_mutex);
 
             } else if (msg.action == UNREGISTER_PUBLISHER) {
                 resp.response_status = OK;
@@ -524,20 +628,43 @@ void * proccess_client_thread(void * args) {
                 }
             }
             // If message in queue, send it
-            if (topic->msg_queue->head != NULL) {
-                LOG("Enviando mensaje en topic %s a %d suscriptores.\n", topic->name, topic->n_sub);
+            if (has_msg(topic->msg_queue)) {
+                // Do not allow for other publishers or subscribers to join this topic
+                // Allow all of them and wait for all to reach the barrier at the end, then  destroy it and unlock mutex
+                // For parallel only barrier at the end, for fair barrier at the beggining and at the end
+                // Secuential is the hardest one
                 // Wait for all subscribers to send
-                msg.action = PUBLISH_DATA;
-                msg.id = 0;
-                strcpy(msg.topic, topic->name);
-                msg.data = topic->msg_queue->head->data;
-                if (send(client->socket_fd, &msg, sizeof(msg), MSG_WAITALL) < 0) {
+                if (mode == MODE_SEQUENTIAL) {
+                    LOCK_LOCAL(topic->utility_mutex);
+                    while (topic->sub_order->curr->id != client->global_id) {
+                        pthread_cond_wait(&topic->secuential, &topic->utility_mutex);
+                    }
+                    UNLOCK_LOCAL(topic->utility_mutex);
+                } else if (mode == MODE_FAIR) {
+                    pthread_barrier_wait(&topic->sync);
+                }
+
+                if (send(client->socket_fd, &topic->msg_queue->head->data, sizeof(publish_msg), MSG_WAITALL) < 0) {
                     ERROR("Failed to send");
                     remove_from_database(client);
                 }
-                delete_msg(topic->msg_queue);
-                // pthread_barrier_destroy(&database->topics[client->topic_id]->sync); // So that next time the number of subs could change
-                // UNLOCK_LOCAL(database->topics[client->topic_id]->op_mutex);
+
+                if (mode == MODE_SEQUENTIAL) {
+                    // Allow next one and then wait for all to finish
+                    topic->sub_order->curr = topic->sub_order->curr->next;
+                    pthread_cond_broadcast(&topic->secuential);
+                }
+
+                pthread_barrier_wait(&topic->sync);
+                LOCK_LOCAL(topic->utility_mutex);
+                topic->sub_order->msg_resend++;
+                if (topic->sub_order->msg_resend == topic->n_sub) {
+                    topic->sub_order->msg_resend = 0;
+                    topic->sub_order->curr = topic->sub_order->head;
+                    delete_msg(topic->msg_queue);
+                }
+                UNLOCK_LOCAL(topic->utility_mutex);
+                UNLOCK_LOCAL(topic->op_mutex);
             }
         }
     }

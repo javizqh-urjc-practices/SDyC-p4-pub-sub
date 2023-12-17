@@ -12,12 +12,6 @@
 #define MODE_PARALLEL_STR "paralelo"
 #define MODE_FAIR_STR "justo"
 
-typedef enum {
-    MODE_SEQUENTIAL = 0,
-    MODE_PARALLEL,
-    MODE_FAIR
-} broker_mode_t;
-
 typedef struct {
     int port;
     broker_mode_t mode;
@@ -34,13 +28,11 @@ void usage() {
 int main(int argc, char *const *argv) {
     broker_args * arguments = check_args(argc, argv);
 
-    printf("Mode: %d\n", arguments->mode);
-    load_config_broker(arguments->port);
+    load_config_broker(arguments->port, arguments->mode);
 
     while (1) {
         wait_for_connection();
     }
-    
 
     free(arguments);
     return 0;

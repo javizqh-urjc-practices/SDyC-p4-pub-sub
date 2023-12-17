@@ -212,7 +212,7 @@ int subscribe(char broker_ip[MAX_IP_SIZE], int broker_port,
 }
 
 char * listen_topic() {
-    message resp;
+    publish_msg resp;
     struct timespec recv_time;
 
     FD_ZERO(&readmask); // Reset la mascara
@@ -230,13 +230,13 @@ char * listen_topic() {
         }
         clock_gettime(CLOCK_REALTIME, &recv_time);
         LOG("Recibido mensaje topic: %s - mensaje: %s - Generó: %ld.%.9ld \
-- Recibido: %ld.%.9ld - Latencia: %ld.%.9ld\n", topic, resp.data.data,
-            resp.data.time_generated_data.tv_sec,
-            resp.data.time_generated_data.tv_nsec, 
+- Recibido: %ld.%.9ld - Latencia: %ld.%.9ld\n", topic, resp.data,
+            resp.time_generated_data.tv_sec,
+            resp.time_generated_data.tv_nsec, 
             recv_time.tv_sec,
             recv_time.tv_nsec,
-            recv_time.tv_sec - resp.data.time_generated_data.tv_sec,
-            recv_time.tv_nsec - resp.data.time_generated_data.tv_nsec
+            recv_time.tv_sec - resp.time_generated_data.tv_sec,
+            recv_time.tv_nsec - resp.time_generated_data.tv_nsec
         ); // FIX: calculate latency properly
     }
 };
