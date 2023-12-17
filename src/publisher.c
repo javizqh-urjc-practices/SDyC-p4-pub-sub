@@ -30,15 +30,22 @@ void usage() {
 
 int main(int argc, char *const *argv) {
     Args arguments = check_args(argc, argv);
-    char data[MAX_DATA_SIZE] = "Test data";
+    char *data = malloc(MAX_DATA_SIZE);
+    int proc_fd;
     
     signal(SIGINT, sig_handler);
     signal(SIGPIPE, sig_handler);
 
     init_publisher(arguments->ip, arguments->port, arguments->topic);
     while (!has_to_exit) {
+        // Open file for reading
+        proc_fd = open("/proc/loadavg", O_RDONLY);
+        // Read /proc/loadavg
+        read(proc_fd, data, MAX_DATA_SIZE);
         publish(data);
-        sleep(2);
+        // Close the file
+        close(proc_fd);
+        sleep(3);
     }
     end_publisher();
     

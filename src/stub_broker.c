@@ -64,6 +64,25 @@ queue * new_queue() {
     return q;
 }
 
+void free_queue(queue * q) {
+    node_msg_t * to_free = q->head;
+    node_msg_t * next = to_free;
+
+    if (to_free != NULL) {
+        if (to_free == q->tail) free(to_free);
+        else {
+            while (next) {
+                to_free = next;
+                next = to_free->next;
+                free(to_free);
+            }
+        }
+    }
+
+    pthread_mutex_destroy(&q->mutex);
+    free(q);
+}
+
 void queue_msg(queue * q, publish_msg data) {
     node_msg_t * new_msg = (node_msg_t *) malloc(sizeof(node_msg_t));
     if (new_msg == NULL) {
@@ -253,9 +272,8 @@ void destroy_topic(topic_t * topic) {
     pthread_mutex_destroy(&topic->op_mutex);
     pthread_mutex_destroy(&topic->utility_mutex);
     pthread_cond_destroy(&topic->secuential);
-    free(topic->sub_order);
-    // TODO: Free all msgs
-    free(topic->msg_queue);
+    free(topic->sub_order); // No need to free nodes anymore
+    free_queue(topic->msg_queue);
     free(topic);
 };
 
@@ -366,6 +384,7 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
                     pthread_barrier_destroy(&database->topics[client->topic_id]->sync); // So that next time the number of subs could change
                 }
                 database->topics[client->topic_id]->n_sub++;
+                printf("Barrier size %d\n", database->topics[client->topic_id]->n_sub);
                 pthread_barrier_init(&database->topics[client->topic_id]->sync,
                                      NULL,
                                      database->topics[client->topic_id]->n_sub);
@@ -589,7 +608,6 @@ void * proccess_client_thread(void * args) {
             }
         }
     } else if (client->type == SUBSCRIBER) {
-
         while (1) {
             // Check if subscriber sent UNREGISTER_PUBLISHER
             FD_ZERO(&readmask); // Reset la mascara
@@ -626,8 +644,8 @@ void * proccess_client_thread(void * args) {
                 LOCK_LOCAL(topic->utility_mutex);
                 if (topic->sub_order->msg_resend == 0) {
                     // Do not allow for other publishers or subscribers to join this topic
-                    LOG("Enviando mensaje en topic %s a %d suscriptores.\n", topic->name, topic->n_sub);
                     LOCK_LOCAL(topic->op_mutex);
+                    LOG("Enviando mensaje en topic %s a %d suscriptores.\n", topic->name, topic->n_sub);
                 }
                 topic->sub_order->msg_resend++;   
                 UNLOCK_LOCAL(topic->utility_mutex);
@@ -671,7 +689,6 @@ void * proccess_client_thread(void * args) {
 
     // Free all memory and close sockets ---------------------------------------
     remove_from_database(client);
-    // Allow another thread in -------------------------------------------------
     pthread_exit(NULL);
 };
 

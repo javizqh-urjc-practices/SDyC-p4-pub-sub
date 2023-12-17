@@ -158,6 +158,7 @@ int wait_unregister_broker(int id) {
 
     return status;
 }
+
 // -------------------------- Functions for publisher --------------------------
 int init_publisher(char broker_ip[MAX_IP_SIZE], int broker_port,
                    char _topic[MAX_TOPIC_SIZE]) {
@@ -213,7 +214,7 @@ int subscribe(char broker_ip[MAX_IP_SIZE], int broker_port,
 
 char * listen_topic() {
     publish_msg resp;
-    struct timespec recv_time;
+    struct timespec recv_time, latency;
 
     FD_ZERO(&readmask); // Reset la mascara
     FD_SET(sockfd, &readmask); // Asignamos el nuevo descriptor
@@ -229,15 +230,24 @@ char * listen_topic() {
             ERROR("Fail to received");
         }
         clock_gettime(CLOCK_REALTIME, &recv_time);
+
+        latency.tv_sec = recv_time.tv_sec - resp.time_generated_data.tv_sec;
+        latency.tv_nsec = recv_time.tv_nsec - resp.time_generated_data.tv_nsec;
+        if (latency.tv_nsec < 0) {
+            // If 1.9 and 2.1 get 0.2
+            latency.tv_nsec = NS_TO_S - latency.tv_nsec;
+            latency.tv_sec--;
+        }
+
         LOG("Recibido mensaje topic: %s - mensaje: %s - Generó: %ld.%.9ld \
-- Recibido: %ld.%.9ld - Latencia: %ld.%.9ld\n", topic, resp.data,
+- Recibido: %ld.%.9ld - Latencia: %ld.%.6ld\n", topic, resp.data,
             resp.time_generated_data.tv_sec,
             resp.time_generated_data.tv_nsec, 
             recv_time.tv_sec,
             recv_time.tv_nsec,
-            recv_time.tv_sec - resp.time_generated_data.tv_sec,
-            recv_time.tv_nsec - resp.time_generated_data.tv_nsec
-        ); // FIX: calculate latency properly
+            latency.tv_sec,
+            latency.tv_nsec / NS_TO_MICROS
+        );
     }
 };
 
