@@ -572,13 +572,7 @@ void * proccess_client_thread(void * args) {
                     msg.data.time_generated_data.tv_sec,
                     msg.data.time_generated_data.tv_nsec);
                 // Queue message and wait to mutex to unlock
-                if (topic->n_sub == 0) continue;
-                
-                queue_msg(topic->msg_queue, msg.data);
-                LOG("Enviando mensaje en topic %s a %d suscriptores.\n", topic->name, topic->n_sub);
-                // TODO: move this from here
-                LOCK_LOCAL(topic->op_mutex);
-
+                if (topic->n_sub > 0) queue_msg(topic->msg_queue, msg.data);
             } else if (msg.action == UNREGISTER_PUBLISHER) {
                 resp.response_status = OK;
                 resp.id = client->id;
@@ -629,7 +623,14 @@ void * proccess_client_thread(void * args) {
             }
             // If message in queue, send it
             if (has_msg(topic->msg_queue)) {
-                // Do not allow for other publishers or subscribers to join this topic
+                LOCK_LOCAL(topic->utility_mutex);
+                if (topic->sub_order->msg_resend == 0) {
+                    // Do not allow for other publishers or subscribers to join this topic
+                    LOG("Enviando mensaje en topic %s a %d suscriptores.\n", topic->name, topic->n_sub);
+                    LOCK_LOCAL(topic->op_mutex);
+                }
+                topic->sub_order->msg_resend++;   
+                UNLOCK_LOCAL(topic->utility_mutex);
                 // Allow all of them and wait for all to reach the barrier at the end, then  destroy it and unlock mutex
                 // For parallel only barrier at the end, for fair barrier at the beggining and at the end
                 // Secuential is the hardest one
@@ -657,7 +658,6 @@ void * proccess_client_thread(void * args) {
 
                 pthread_barrier_wait(&topic->sync);
                 LOCK_LOCAL(topic->utility_mutex);
-                topic->sub_order->msg_resend++;
                 if (topic->sub_order->msg_resend == topic->n_sub) {
                     topic->sub_order->msg_resend = 0;
                     topic->sub_order->curr = topic->sub_order->head;
