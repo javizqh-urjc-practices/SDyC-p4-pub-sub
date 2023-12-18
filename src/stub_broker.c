@@ -384,7 +384,6 @@ void add_to_database(client_t *client, char topic[MAX_TOPIC_SIZE]) {
                     pthread_barrier_destroy(&database->topics[client->topic_id]->sync); // So that next time the number of subs could change
                 }
                 database->topics[client->topic_id]->n_sub++;
-                printf("Barrier size %d\n", database->topics[client->topic_id]->n_sub);
                 pthread_barrier_init(&database->topics[client->topic_id]->sync,
                                      NULL,
                                      database->topics[client->topic_id]->n_sub);
@@ -567,7 +566,7 @@ void * proccess_client_thread(void * args) {
             LOG("Nuevo cliente (%d) Publicador conectado : %s\n", client->id,
                 msg.topic);
         } else {
-            LOG("Nuevo cliente (%d) Subscriptot conectado : %s\n", client->id,
+            LOG("Nuevo cliente (%d) Suscriptor conectado : %s\n", client->id,
                 msg.topic);
         }
         print_summary();
@@ -612,7 +611,7 @@ void * proccess_client_thread(void * args) {
             // Check if subscriber sent UNREGISTER_PUBLISHER
             FD_ZERO(&readmask); // Reset la mascara
             FD_SET(client->socket_fd, &readmask); // Asignamos el nuevo descriptor
-            FD_SET(STDIN_FILENO, &readmask); // Entrada
+            // FD_SET(STDIN_FILENO, &readmask); // Entrada
             timeout.tv_sec=0; timeout.tv_usec=5000; // Timeout de 0.005 seg.
             if (select(client->socket_fd+1, &readmask, NULL, NULL, &timeout )== -1) {
                 continue;

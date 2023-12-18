@@ -156,6 +156,8 @@ int wait_unregister_broker(int id) {
         break;
     }
 
+    close(sockfd);
+
     return status;
 }
 
@@ -218,7 +220,7 @@ char * listen_topic() {
 
     FD_ZERO(&readmask); // Reset la mascara
     FD_SET(sockfd, &readmask); // Asignamos el nuevo descriptor
-    FD_SET(STDIN_FILENO, &readmask); // Entrada
+    // FD_SET(STDIN_FILENO, &readmask); // Entrada
     timeout.tv_sec=0; timeout.tv_usec=500000; // Timeout de 0.5 seg.
 
     if (select(sockfd+1, &readmask, NULL, NULL, &timeout )== -1) {
