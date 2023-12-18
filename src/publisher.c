@@ -42,6 +42,10 @@ int main(int argc, char *const *argv) {
         proc_fd = open("/proc/loadavg", O_RDONLY);
         // Read /proc/loadavg
         read(proc_fd, data, MAX_DATA_SIZE);
+        // Remove \n
+        for (char *ptr = data; *ptr != '\0'; ptr++) {
+            if (*ptr == '\n') *ptr = '\0';
+        }
         publish(data);
         // Close the file
         close(proc_fd);
